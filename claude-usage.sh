@@ -9,6 +9,7 @@ if [[ "${button:-}" == "1" ]]; then
     xdg-open "https://claude.ai/settings/usage" &>/dev/null &
 fi
 
+CLAUDE_VERSION="${CLAUDE_VERSION:-$(claude --version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "2.1.69")}"
 CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CREDENTIALS_FILE="$CLAUDE_CONFIG_DIR/.credentials.json"
 API_URL="https://api.anthropic.com/api/oauth/usage"
@@ -25,12 +26,21 @@ if [[ -z "$TOKEN" ]]; then
     exit 0
 fi
 
-RESPONSE=$(curl -sf --max-time 5 "$API_URL" \
+RESPONSE=$(curl -s --max-time 5 -w '\n%{http_code}' "$API_URL" \
     -H "Authorization: Bearer $TOKEN" \
-    -H "anthropic-beta: oauth-2025-04-20") || {
+    -H "anthropic-beta: oauth-2025-04-20" \
+    -H "User-Agent: claude-code/${CLAUDE_VERSION:-2.1.69}") || {
     echo "CC: err"
     exit 0
 }
+
+HTTP_CODE=$(tail -1 <<< "$RESPONSE")
+RESPONSE=$(sed '$d' <<< "$RESPONSE")
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+    echo "CC: HTTP $HTTP_CODE"
+    exit 0
+fi
 
 time_left() {
     local reset="$1"
