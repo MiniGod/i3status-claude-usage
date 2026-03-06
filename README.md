@@ -6,6 +6,8 @@ A small bash script that displays your Claude Code usage (5-hour window and 7-da
 CC: 75% 5h (3h29m) | 40% 7d (4d2h)
 ```
 
+<img width="352" height="35" alt="image" src="https://github.com/user-attachments/assets/01425597-e3a7-49ea-bd3a-f11774259c12" />
+
 ## Dependencies
 
 - `curl`
