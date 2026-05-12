@@ -66,4 +66,26 @@ SEVEN_D_RESET=$(echo "$RESPONSE" | jq -r '.seven_day.resets_at // empty')
 FIVE_H_LEFT=$(time_left "$FIVE_H_RESET")
 SEVEN_D_LEFT=$(time_left "$SEVEN_D_RESET")
 
-echo "CC: ${FIVE_H}% 5h (${FIVE_H_LEFT}) | ${SEVEN_D}% 7d (${SEVEN_D_LEFT})"
+# Project end-of-window usage: used × window / elapsed.
+# Window is 5h (18000s); elapsed = 18000 - time_left_sec.
+FIVE_H_PROJ=""
+if [[ -n "$FIVE_H_RESET" ]]; then
+    reset_epoch=$(date -d "$FIVE_H_RESET" +%s 2>/dev/null || echo "")
+    if [[ -n "$reset_epoch" ]]; then
+        now_epoch=$(date +%s)
+        left_sec=$((reset_epoch - now_epoch))
+        elapsed_sec=$((18000 - left_sec))
+        # Need at least 60s elapsed and a valid window to extrapolate.
+        if ((elapsed_sec >= 60 && left_sec > 0 && left_sec <= 18000)); then
+            FIVE_H_PROJ=$(( (FIVE_H * 18000 + elapsed_sec / 2) / elapsed_sec ))
+        fi
+    fi
+fi
+
+if [[ -n "$FIVE_H_PROJ" ]]; then
+    FIVE_H_STR="${FIVE_H}%→${FIVE_H_PROJ}%"
+else
+    FIVE_H_STR="${FIVE_H}%"
+fi
+
+echo "CC: ${FIVE_H_STR} 5h (${FIVE_H_LEFT}) | ${SEVEN_D}% 7d (${SEVEN_D_LEFT})"
