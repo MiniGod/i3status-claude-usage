@@ -13,6 +13,8 @@ CLAUDE_VERSION="${CLAUDE_VERSION:-$(claude --version 2>/dev/null | grep -oP '[\d
 CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CREDENTIALS_FILE="$CLAUDE_CONFIG_DIR/.credentials.json"
 API_URL="https://api.anthropic.com/api/oauth/usage"
+LOG_FILE="${CLAUDE_USAGE_LOG:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-usage.log}"
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 if [[ ! -f "$CREDENTIALS_FILE" ]]; then
     echo "CC: no creds"
@@ -58,6 +60,7 @@ time_left() {
     fi
 }
 
+FIVE_H_RAW=$(echo "$RESPONSE" | jq -r '.five_hour.utilization // 0')
 FIVE_H=$(echo "$RESPONSE" | jq -r '(.five_hour.utilization // 0) | round')
 FIVE_H_RESET=$(echo "$RESPONSE" | jq -r '.five_hour.resets_at // empty')
 SEVEN_D=$(echo "$RESPONSE" | jq -r '(.seven_day.utilization // 0) | round')
@@ -66,20 +69,75 @@ SEVEN_D_RESET=$(echo "$RESPONSE" | jq -r '.seven_day.resets_at // empty')
 FIVE_H_LEFT=$(time_left "$FIVE_H_RESET")
 SEVEN_D_LEFT=$(time_left "$SEVEN_D_RESET")
 
-# Project end-of-window usage: used × window / elapsed.
-# Window is 5h (18000s); elapsed = 18000 - time_left_sec.
-FIVE_H_PROJ=""
+now_epoch=$(date +%s)
+reset_epoch=""
 if [[ -n "$FIVE_H_RESET" ]]; then
     reset_epoch=$(date -d "$FIVE_H_RESET" +%s 2>/dev/null || echo "")
-    if [[ -n "$reset_epoch" ]]; then
-        now_epoch=$(date +%s)
-        left_sec=$((reset_epoch - now_epoch))
-        elapsed_sec=$((18000 - left_sec))
-        # Need at least 60s elapsed and a valid window to extrapolate.
-        if ((elapsed_sec >= 60 && left_sec > 0 && left_sec <= 18000)); then
-            FIVE_H_PROJ=$(( (FIVE_H * 18000 + elapsed_sec / 2) / elapsed_sec ))
+fi
+
+# Project end-of-window usage: used × window / elapsed (5h = 18000s).
+FIVE_H_PROJ=""
+if [[ -n "$reset_epoch" ]]; then
+    left_sec=$((reset_epoch - now_epoch))
+    elapsed_sec=$((18000 - left_sec))
+    if ((elapsed_sec >= 60 && left_sec > 0 && left_sec <= 18000)); then
+        FIVE_H_PROJ=$(( (FIVE_H * 18000 + elapsed_sec / 2) / elapsed_sec ))
+    fi
+fi
+
+# Recent burn rate: usage delta vs ~10 min ago in the same session window.
+# Linear-interpolates between the two log entries straddling now-10m;
+# falls back to closest single entry (labelled with actual age) if not straddled.
+RECENT_STR=""
+if [[ -n "$reset_epoch" && -f "$LOG_FILE" ]]; then
+    target=$((now_epoch - 600))
+    history_result=$(awk -v target="$target" -v reset="$reset_epoch" -v now="$now_epoch" '
+        ($3 + 0) == reset && ($1 + 0) <= now {
+            t[++n] = $1 + 0
+            u[n] = $2 + 0
+        }
+        END {
+            if (n == 0) exit
+            lo = 0; hi = 0
+            for (i = 1; i <= n; i++) {
+                if (t[i] <= target) lo = i
+                else { hi = i; break }
+            }
+            if (lo && hi) {
+                frac = (target - t[lo]) / (t[hi] - t[lo])
+                printf "%.4f %d\n", u[lo] + frac * (u[hi] - u[lo]), target
+            } else if (lo) {
+                printf "%.4f %d\n", u[lo], t[lo]
+            } else {
+                printf "%.4f %d\n", u[1], t[1]
+            }
+        }
+    ' "$LOG_FILE")
+    if [[ -n "$history_result" ]]; then
+        read -r past_u past_t <<< "$history_result"
+        age_sec=$((now_epoch - past_t))
+        if ((age_sec >= 60)); then
+            delta=$(awk -v c="$FIVE_H_RAW" -v p="$past_u" 'BEGIN {
+                d = c - p
+                if (d >= 0) printf "+%d", int(d + 0.5)
+                else printf "-%d", int(-d + 0.5)
+            }')
+            if ((past_t == target)); then
+                label="10m"
+            else
+                label="$(( (age_sec + 30) / 60 ))m"
+            fi
+            RECENT_STR=" ${delta}%/${label}"
         fi
     fi
+fi
+
+# Append current reading; prune entries older than 6h.
+if [[ -n "$reset_epoch" ]]; then
+    {
+        [[ -f "$LOG_FILE" ]] && awk -v cutoff=$((now_epoch - 21600)) '($1 + 0) >= cutoff' "$LOG_FILE" 2>/dev/null
+        printf '%d\t%s\t%d\n' "$now_epoch" "$FIVE_H_RAW" "$reset_epoch"
+    } > "${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE"
 fi
 
 if [[ -n "$FIVE_H_PROJ" ]]; then
@@ -88,4 +146,4 @@ else
     FIVE_H_STR="${FIVE_H}%"
 fi
 
-echo "CC: ${FIVE_H_STR} 5h (${FIVE_H_LEFT}) | ${SEVEN_D}% 7d (${SEVEN_D_LEFT})"
+echo "CC: ${FIVE_H_STR}${RECENT_STR} 5h (${FIVE_H_LEFT}) | ${SEVEN_D}% 7d (${SEVEN_D_LEFT})"
